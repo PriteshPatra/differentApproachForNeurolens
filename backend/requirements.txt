@@ -8,5 +8,13 @@ python-multipart>=0.0.9
 pydantic>=2.7.0
 
 plyer==2.1.0
+win10toast==0.9; sys_platform == 'win32'
 wmi==1.5.1; sys_platform == 'win32'
 screen-brightness-control==0.24.0
+
+transformers>=4.40.0
+torch>=2.2.0
+torchaudio>=2.2.0
+librosa>=0.10.1
+soundfile>=0.12.1
+accelerate>=0.30.0

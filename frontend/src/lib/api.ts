@@ -72,3 +72,26 @@ export async function triggerOSNotification(title: string, message: string): Pro
     return false;
   }
 }
+
+export interface VoiceResponse {
+  emotion: string
+  stress_level: number
+  confidence: number
+}
+
+export async function detectVoice(audioBase64: string): Promise<VoiceResponse | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/voice`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio: audioBase64 })
+    })
+
+    if (!res.ok) throw new Error('Voice detection failed')
+
+    return await res.json()
+  } catch (err) {
+    console.error('Error detecting voice emotion:', err)
+    return null
+  }
+}

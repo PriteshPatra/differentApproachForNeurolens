@@ -30,4 +30,4 @@ echo "🚀 Starting Native FastAPI Backend on port 8001..."
 echo "Your OS brightness and notifications are now directly connected!"
 echo ""
 
-uvicorn main:app --host 0.0.0.0 --port 8001 --workers 6
+uvicorn main:app --host 0.0.0.0 --port 8001

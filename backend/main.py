@@ -10,19 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from ultralytics import YOLO
 
+from voice import detect_voice_emotion  # NEW
+
 # ─── Paths ──────────────────────────────────────────────────────────────────
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-# In the Docker container, the volume is mounted at /app/runs
-# When running locally, it would be ../runs from backend/main.py
+
 MODEL_PATH = os.environ.get(
     "MODEL_PATH",
     os.path.join(BASE_PATH, "..", "runs", "detect", "emotion_model_train", "weights", "best.pt")
 )
-# Force to /app/runs when inside docker based on the Dockerfile WORKDIR
+
 if os.path.exists("/app/runs/detect/emotion_model_train/weights/best.pt"):
     MODEL_PATH = "/app/runs/detect/emotion_model_train/weights/best.pt"
 
-# ─── Emotion → Stress Mapping (identical to ui.py) ──────────────────────────
+# ─── Emotion → Stress Mapping ───────────────────────────────────────────────
 STRESS_MAPPING: dict[str, int] = {
     "Happy": 0,
     "Neutral": 10,
@@ -35,7 +36,6 @@ STRESS_MAPPING: dict[str, int] = {
     "N/A": 0,
 }
 
-# Emotion → UI colour (used by frontend badge)
 EMOTION_COLOR: dict[str, str] = {
     "Happy": "#22c55e",
     "Neutral": "#6366f1",
@@ -59,7 +59,7 @@ CLASS_NAMES = {
     7: "Surprise",
 }
 
-# ─── Model (loaded once at startup) ─────────────────────────────────────────
+# ─── Model ──────────────────────────────────────────────────────────────────
 model: Optional[YOLO] = None
 
 
@@ -67,13 +67,17 @@ model: Optional[YOLO] = None
 async def lifespan(app: FastAPI):
     global model
     model_abs = os.path.abspath(MODEL_PATH)
+
     if not os.path.exists(model_abs):
         raise RuntimeError(f"Model not found at: {model_abs}")
+
     model = YOLO(model_abs)
     model.model.names = CLASS_NAMES
+
     print(f"✅ YOLO model loaded from: {model_abs}")
+
     yield
-    # Cleanup (if needed)
+
     model = None
 
 
@@ -87,17 +91,16 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # ─── Request / Response Models ───────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    image: str  # base64-encoded JPEG/PNG
-    confidence: float = 0.6  # detection confidence threshold
+    image: str
+    confidence: float = 0.6
 
 
 class PredictResponse(BaseModel):
@@ -105,7 +108,11 @@ class PredictResponse(BaseModel):
     stress_level: int
     confidence: float
     emotion_color: str
-    annotated_image: str  # base64-encoded annotated JPEG
+    annotated_image: str
+
+
+class VoiceRequest(BaseModel):
+    audio: str  # base64 encoded audio
 
 
 class BrightnessRequest(BaseModel):
@@ -114,6 +121,12 @@ class BrightnessRequest(BaseModel):
     max_brightness: int = 100
     smoothing_factor: float = 0.1
     current_brightness: float = 100.0
+    
+    def model_post_init(self, __context):
+        if self.min_brightness >= self.max_brightness:
+            raise ValueError("min_brightness must be less than max_brightness")
+        if not 0 <= self.stress_level <= 100:
+            raise ValueError("stress_level must be between 0 and 100")
 
 
 class BrightnessResponse(BaseModel):
@@ -121,49 +134,63 @@ class BrightnessResponse(BaseModel):
     new_brightness: float
 
 
+class NotifyRequest(BaseModel):
+    title: str
+    message: str
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 def decode_image(b64: str) -> np.ndarray:
-    """Base64 string → OpenCV BGR ndarray."""
     if "," in b64:
         b64 = b64.split(",", 1)[1]
+
     raw = base64.b64decode(b64)
     buf = np.frombuffer(raw, dtype=np.uint8)
     img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
     if img is None:
-        raise ValueError("Could not decode image from base64 payload")
+        raise ValueError("Could not decode image")
+
     return img
 
 
 def encode_image(img: np.ndarray) -> str:
-    """OpenCV BGR ndarray → base64 JPEG string."""
     _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return base64.b64encode(buf.tobytes()).decode("utf-8")
+
+
+def decode_audio(b64: str, save_path="temp_audio.wav") -> str:
+    if "," in b64:
+        b64 = b64.split(",", 1)[1]
+
+    raw = base64.b64decode(b64)
+
+    with open(save_path, "wb") as f:
+        f.write(raw)
+
+    return save_path
 
 
 import os_brightness
 import os_notifier
 
 # ─── Routes ─────────────────────────────────────────────────────────────────
+
 @app.get("/api/health")
 def health():
-    """Health check — confirms server and model are ready."""
     return {"status": "ok", "model_loaded": model is not None}
 
 
 @app.post("/api/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    """
-    Run YOLO inference on a single frame.
-    Returns the top-confidence emotion, its stress score,
-    the raw confidence value, and the annotated frame as base64.
-    """
+
     if model is None:
-        raise HTTPException(status_code=503, detail="Model not loaded yet")
+        raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
         img = decode_image(req.image)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid image payload: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
     img_resized = cv2.resize(img, (640, 480))
     results = model.predict(source=img_resized, verbose=False, conf=req.confidence)
@@ -176,10 +203,9 @@ def predict(req: PredictRequest):
         boxes = results[0].boxes
         best_idx = int(boxes.conf.argmax())
         box = boxes[best_idx]
+
         emotion_label = CLASS_NAMES[int(box.cls[0])]
         confidence_val = float(box.conf[0])
-
-        # Use detected emotion directly (removed 0.6 threshold to detect more emotions)
         stress_level = STRESS_MAPPING.get(emotion_label, 10)
 
     return PredictResponse(
@@ -191,23 +217,42 @@ def predict(req: PredictRequest):
     )
 
 
+# ─── Voice Emotion Detection ────────────────────────────────────────────────
+@app.post("/api/voice")
+def detect_voice(req: VoiceRequest):
+
+    try:
+        audio_path = decode_audio(req.audio)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid audio payload: {e}")
+
+    emotion, confidence = detect_voice_emotion(audio_path)
+
+    stress_level = STRESS_MAPPING.get(emotion, 10)
+
+    return {
+        "emotion": emotion,
+        "stress_level": stress_level,
+        "confidence": confidence
+    }
+
+
+# ─── Brightness Control ─────────────────────────────────────────────────────
 @app.post("/api/brightness", response_model=BrightnessResponse)
 def compute_brightness(req: BrightnessRequest):
-    """
-    Compute adaptive brightness given current stress level and apply it to OS.
-    """
+
     target = req.max_brightness - (req.stress_level / 100) * (
         req.max_brightness - req.min_brightness
     )
+
     new_brightness = (
         (1 - req.smoothing_factor) * req.current_brightness
         + req.smoothing_factor * target
     )
-    
-    # ─── OS INTERACTION ───
+
     final_target = int(round(target))
+
     os_brightness.set_brightness(final_target)
-    # ──────────────────────
 
     return BrightnessResponse(
         target_brightness=final_target,
@@ -215,20 +260,19 @@ def compute_brightness(req: BrightnessRequest):
     )
 
 
-class NotifyRequest(BaseModel):
-    title: str
-    message: str
-
+# ─── Notification System ────────────────────────────────────────────────────
 @app.post("/api/notify")
 def trigger_notification(req: NotifyRequest):
-    """Trigger a native desktop notification."""
+
     os_notifier.send_notification(req.title, req.message)
+
     return {"status": "sent"}
 
 
+# ─── Emotion Metadata ───────────────────────────────────────────────────────
 @app.get("/api/emotions")
 def get_emotions():
-    """Return all emotion classes, their stress levels, and colours."""
+
     return {
         "emotions": [
             {
