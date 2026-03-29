@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import WebcamCapture from '@/components/WebcamCapture';
 import EmotionDisplay from '@/components/EmotionDisplay';
 import StressGauge from '@/components/StressGauge';
 import RealTimeChart from '@/components/RealTimeChart';
+import VoiceAnalyzer from '@/components/VoiceAnalyzer';
 import { useSettings } from '@/context/SettingsContext';
 import { computeBrightness } from '@/lib/api';
 import { AlertTriangle, Power } from 'lucide-react';
@@ -26,6 +27,13 @@ export default function Dashboard() {
   const [lastNotificationTime, setLastNotificationTime] = useState<number>(0);
 
   const [emotionHistory, setEmotionHistory] = useState<string[]>([]);
+  const [voiceStress, setVoiceStress] = useState(0);
+  const voiceStressRef = useRef(0);
+
+  const handleVoiceStressUpdate = useCallback((v: number) => {
+    voiceStressRef.current = v;
+    setVoiceStress(v);
+  }, []);
 
   // Request browser notification permissions on mount
   useEffect(() => {
@@ -62,7 +70,8 @@ export default function Dashboard() {
             "Contempt": 80, "Disgust": 85, "Fear": 95, "Anger": 100, "N/A": 0
         };
         const totalStress = newHistory.reduce((acc, em) => acc + (STRESS_MAPPING[em] ?? 0), 0);
-        const smoothedStress = Math.round(totalStress / newHistory.length);
+        const facialStress = Math.round(totalStress / newHistory.length);
+        const smoothedStress = Math.round(facialStress * 0.6 + voiceStressRef.current * 0.4);
         setCurrentStress(smoothedStress);
 
         // 3. Update charts and history with stable stress
@@ -163,7 +172,11 @@ export default function Dashboard() {
         {/* Left Column - Video Feed & Chart */}
         <div className="flex-col gap-4">
           <WebcamCapture onAnalyticsUpdate={handleAnalyticsUpdate} isActive={isActive} />
-          
+
+          <div style={{ marginTop: '1.5rem' }}>
+            <VoiceAnalyzer isActive={isActive} onVoiceStressUpdate={handleVoiceStressUpdate} />
+          </div>
+
           <div style={{ marginTop: '1.5rem' }}>
             <RealTimeChart data={stressHistory} />
           </div>
